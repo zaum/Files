@@ -31,7 +31,7 @@ namespace Files.App.Controls
 		}
 
 		public Thickness SectionGapMargin => _hasExpandedPredecessor
-			? new Thickness(0, 12, 0, 0)
+			? new Thickness(0, 8, 0, 0)
 			: new Thickness(0);
 
 		public event PropertyChangedEventHandler? PropertyChanged;
