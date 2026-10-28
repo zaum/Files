@@ -83,6 +83,73 @@ namespace Files.App.Utils.FileTags
 			}
 		}
 
+		public static void UpdateTagsDb()
+		{
+			var dbInstance = GetDbInstance();
+			foreach (var file in dbInstance.GetAll())
+			{
+				var pathFromFrn = Win32Helper.PathFromFileId(file.Frn ?? 0, file.FilePath);
+				if (pathFromFrn is not null)
+				{
+					// Frn is valid, update file path
+					var normalizedPath = RemoveExtendedPathPrefix(pathFromFrn);
+					var tag = ReadFileTag(normalizedPath);
+					if (tag.Length > 0)
+					{
+						dbInstance.UpdateTag(file.Frn ?? 0, null, normalizedPath);
+						dbInstance.SetTags(normalizedPath, file.Frn, tag);
+					}
+					else if (!IsUnreachable(normalizedPath))
+					{
+						dbInstance.SetTags(normalizedPath, file.Frn, []);
+					}
+				}
+				else
+				{
+					var tag = ReadFileTag(file.FilePath);
+					if (tag.Length > 0)
+					{
+						if (!SafetyExtensions.IgnoreExceptions(() =>
+						{
+							var frn = GetFileFRN(file.FilePath);
+							dbInstance.UpdateTag(file.FilePath, frn, null);
+							dbInstance.SetTags(file.FilePath, frn, tag);
+						}, App.Logger))
+						{
+							dbInstance.SetTags(file.FilePath, null, []);
+						}
+					}
+					else if (!IsUnreachable(file.FilePath))
+					{
+						dbInstance.SetTags(file.FilePath, null, []);
+					}
+				}
+			}
+		}
+
+		/// <summary>
+		/// Converts extended-length paths, including UNC ones, back to their plain form.
+		/// </summary>
+		private static string RemoveExtendedPathPrefix(string path)
+		{
+			if (path.StartsWith(@"\\?\UNC\", StringComparison.Ordinal))
+				return @"\\" + path[8..];
+
+			return path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..] : path;
+		}
+
+		/// <summary>
+		/// Determines whether the item is unreachable, in which case a failed tag read cannot be treated as "untagged".
+		/// </summary>
+		private static bool IsUnreachable(string path)
+		{
+			if (IO.File.Exists(path) || IO.Directory.Exists(path))
+				return false;
+
+			// The item is gone, but the entry is only stale if its storage is currently reachable.
+			var storageRoot = IO.Path.GetPathRoot(path);
+			return string.IsNullOrEmpty(storageRoot) || !(IO.Directory.Exists(storageRoot) || IO.File.Exists(storageRoot));
+		}
 
 		/// <summary>
 		/// Prompts the user for confirmation, then removes all tags from the given items that have tags.
