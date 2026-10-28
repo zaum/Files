@@ -662,14 +662,14 @@ namespace Files.App.Helpers.ContextFlyouts
 					return false;
 
 				// Calibrated against realized MenuFlyoutPresenter heights (logical units)
-				var estimatedHeight = 8.0;
+				var estimatedHeight = 4.0;
 				foreach (var it in Flyout.Items)
 				{
 					// Collapsed items (unswapped placeholders) take no space
 					if (it.Visibility == Visibility.Collapsed)
 						continue;
 
-					estimatedHeight += it is MenuFlyoutSeparator ? 3.0 : ReferenceEquals(it, primaryRow) ? 44.0 : 34.0;
+					estimatedHeight += it is MenuFlyoutSeparator ? 3.0 : ReferenceEquals(it, primaryRow) ? 34.0 : 26.0;
 				}
 
 				// The flyout is a windowed popup that can extend past the app window, so fit is decided

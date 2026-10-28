@@ -31,14 +31,15 @@
 
 			<Style TargetType="MenuFlyoutPresenter">
 				<Setter Target="HighContrastAdjustment" Value="None" />
+				<Setter Property="Padding" Value="0,2,0,2" />
 			</Style>
 
 			<!--  Context menu primary command buttons: transparent, with hover/pressed driven by the menu-item brushes via the template's own visual states  -->
 			<Style x:Key="PrimaryCommandButtonStyle" TargetType="Button">
 				<Setter Property="Background" Value="Transparent" />
 				<Setter Property="BorderThickness" Value="0" />
-				<Setter Property="Width" Value="38" />
-				<Setter Property="Height" Value="38" />
+				<Setter Property="Width" Value="30" />
+				<Setter Property="Height" Value="30" />
 				<Setter Property="Padding" Value="0" />
 				<Setter Property="CornerRadius" Value="4" />
 				<Setter Property="HorizontalContentAlignment" Value="Center" />
@@ -82,22 +83,34 @@
 			</Style>
 
 			<ControlTemplate x:Key="PrimaryCommandMenuFlyoutItemTemplate" TargetType="MenuFlyoutItem">
-				<ContentPresenter Margin="4,2" Content="{TemplateBinding Tag}" />
+				<ContentPresenter Margin="2,1" Content="{TemplateBinding Tag}" />
 			</ControlTemplate>
 
+			<!--  Denser context menu metrics, overriding the WinUI defaults (11,8,11,9 padding and 4,2,4,2 margin)  -->
+			<Thickness x:Key="MenuFlyoutItemMargin">2,1,2,1</Thickness>
+			<Thickness x:Key="MenuFlyoutItemThemePadding">8,2,8,2</Thickness>
+			<Thickness x:Key="MenuFlyoutItemThemePaddingNarrow">8,1,8,1</Thickness>
+
 			<!--  Workaround for https://github.com/files-community/Files/issues/12026  -->
+			<!--  Context menu rows are tighter than the WinUI defaults (32 px) to match the dense sidebar  -->
 			<Style BasedOn="{StaticResource DefaultMenuFlyoutItemStyle}" TargetType="MenuFlyoutItem">
 				<Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" />
+				<Setter Property="MinHeight" Value="24" />
+				<Setter Property="Padding" Value="8,0,8,0" />
 			</Style>
 
 			<!--  Workaround for https://github.com/files-community/Files/issues/12026  -->
 			<Style BasedOn="{StaticResource DefaultToggleMenuFlyoutItemStyle}" TargetType="ToggleMenuFlyoutItem">
 				<Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" />
+				<Setter Property="MinHeight" Value="24" />
+				<Setter Property="Padding" Value="8,0,8,0" />
 			</Style>
 
 			<!--  Workaround for https://github.com/files-community/Files/issues/12026  -->
 			<Style BasedOn="{StaticResource DefaultMenuFlyoutSubItemStyle}" TargetType="MenuFlyoutSubItem">
 				<Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}" />
+				<Setter Property="MinHeight" Value="24" />
+				<Setter Property="Padding" Value="8,0,8,0" />
 			</Style>
 
 			<Style BasedOn="{StaticResource DefaultComboBoxStyle}" TargetType="uc:ComboBoxEx" />
