@@ -2491,6 +2491,15 @@ namespace Files.App.ViewModels
 				}
 				else
 				{
+					// Cache the resolved folder before the listing so the cloud placeholder probe below
+					// can run while the enumeration is still in flight instead of after it.
+					currentStorageFolder ??= await FilesystemTasks.Wrap(() => StorageFileExtensions.DangerousGetFolderWithPathFromPathAsync(path));
+					rootFolder ??= currentStorageFolder?.Item;
+					var cloudSyncTask = rootFolder is not null &&
+						!string.Equals(path, Constants.UserEnvironmentPaths.RecycleBinPath, StringComparison.OrdinalIgnoreCase)
+							? CheckCloudDriveSyncStatusAsync(rootFolder)
+							: null;
+
 					await Task.Run(async () =>
 					{
 						List<ListedItem> fileList = await Win32StorageEnumerator.ListEntries(path, hFile, findData, cancellationToken, -1, GetPreloadIconSize(), intermediateAction: async (intermediateList) =>
@@ -2515,17 +2524,14 @@ namespace Files.App.ViewModels
 						desktopIniUpdateTask = UpdateDesktopIniAsync(workingDirectory, cancellationToken);
 					});
 
-					// Cache the resolved folder so the post-enum switch reuses it.
-					currentStorageFolder ??= await FilesystemTasks.Wrap(() => StorageFileExtensions.DangerousGetFolderWithPathFromPathAsync(path));
-					rootFolder ??= currentStorageFolder?.Item;
 					if (rootFolder is not null)
 					{
 						if (rootFolder.DisplayName is not null)
 							currentFolder.ItemNameRaw = rootFolder.DisplayName;
 
-						if (!string.Equals(path, Constants.UserEnvironmentPaths.RecycleBinPath, StringComparison.OrdinalIgnoreCase))
+						if (cloudSyncTask is not null)
 						{
-							enumeratedCloudSyncStatus = await CheckCloudDriveSyncStatusAsync(rootFolder);
+							enumeratedCloudSyncStatus = await cloudSyncTask;
 							currentFolder.SyncStatusUI = CloudDriveSyncStatusUI.FromCloudDriveSyncStatus(enumeratedCloudSyncStatus.Value);
 						}
 					}

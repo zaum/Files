@@ -4,6 +4,7 @@
 using Files.App.Services.SizeProvider;
 using Files.Shared.Helpers;
 using Microsoft.Extensions.Logging;
+using System.Collections.Concurrent;
 using System.IO;
 using Windows.Storage;
 using FileAttributes = System.IO.FileAttributes;
@@ -43,7 +44,7 @@ namespace Files.App.Utils.Storage
 			bool showDotFiles = userSettingsService.FoldersSettingsService.ShowDotFiles;
 			bool areAlternateStreamsVisible = userSettingsService.FoldersSettingsService.AreAlternateStreamsVisible;
 
-			var isGitRepo = GitHelpers.IsRepositoryEx(path, out var repoPath) && !string.IsNullOrEmpty(await GitHelpers.GetRepositoryHeadName(repoPath));
+			var isGitRepo = await IsGitRepositoryAsync(path, cancellationToken);
 			var rawHandle = hFile.DangerousGetHandle();
 
 			try
@@ -124,6 +125,44 @@ namespace Files.App.Utils.Storage
 			}
 
 			return tempList;
+		}
+
+		// Discovering the repository walks the ancestors and opening it with libgit2 costs milliseconds,
+		// so the answer is cached briefly: moving between folders of one repository reuses it.
+		private static readonly ConcurrentDictionary<string, (bool IsRepo, long Stamp)> gitRepoProbeCache = new();
+		private const long GitRepoProbeTtlMs = 5000;
+
+		private static async Task<bool> IsGitRepositoryAsync(string path, CancellationToken cancellationToken)
+		{
+			var now = Environment.TickCount64;
+			if (gitRepoProbeCache.TryGetValue(path, out var cached) && now - cached.Stamp < GitRepoProbeTtlMs)
+				return cached.IsRepo;
+
+			var isRepo = false;
+
+			try
+			{
+				isRepo = GitHelpers.IsRepositoryEx(path, out var repoPath) && !string.IsNullOrEmpty(await GitHelpers.GetRepositoryHeadName(repoPath));
+			}
+			catch (OperationCanceledException)
+			{
+				return false;
+			}
+			catch (Exception ex)
+			{
+				App.Logger.LogDebug(ex, "Failed to determine whether the folder is a git repository.");
+			}
+
+			if (cancellationToken.IsCancellationRequested)
+				return isRepo;
+
+			// Keep the map from growing without bound during long sessions
+			if (gitRepoProbeCache.Count > 512)
+				gitRepoProbeCache.Clear();
+
+			gitRepoProbeCache[path] = (isRepo, now);
+
+			return isRepo;
 		}
 
 		private static IEnumerable<ListedItem> EnumAdsForPath(string itemPath, ListedItem main)
