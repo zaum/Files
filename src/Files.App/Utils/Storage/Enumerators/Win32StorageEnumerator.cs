@@ -3,6 +3,7 @@
 
 using Files.App.Services.SizeProvider;
 using Files.Shared.Helpers;
+using Microsoft.Extensions.Logging;
 using System.IO;
 using Windows.Storage;
 using FileAttributes = System.IO.FileAttributes;
@@ -161,6 +162,55 @@ namespace Files.App.Utils.Storage
 				FileSize = ads.Size.ToSizeString(),
 				FileSizeBytes = ads.Size
 			};
+		}
+
+		// Shortcut targets are resolved after the item is listed. The shell parse takes milliseconds
+		// per file, so it runs off the listing path and behind a small gate to keep the shell from
+		// being flooded when a folder holds thousands of shortcuts.
+		private static readonly SemaphoreSlim shortcutHydrationGate = new(4);
+
+		private static void QueueShortcutHydration(IShortcutItem shortcut, string itemPath, long sizeBytes, CancellationToken cancellationToken)
+		{
+			// A zero-byte shortcut carries no link data, so the shell parse can only throw
+			if (sizeBytes == 0 || cancellationToken.IsCancellationRequested)
+				return;
+
+			_ = Task.Run(async () =>
+			{
+				var entered = false;
+
+				try
+				{
+					await shortcutHydrationGate.WaitAsync(cancellationToken);
+					entered = true;
+
+					if (cancellationToken.IsCancellationRequested || !string.IsNullOrEmpty(shortcut.TargetPath))
+						return;
+
+					var linkInfo = await FileOperationsHelpers.ParseLinkAsync(itemPath, resolveTarget: false);
+					if (linkInfo is null)
+						return;
+
+					shortcut.TargetPath = linkInfo.TargetPath;
+					shortcut.Arguments = linkInfo.Arguments;
+					shortcut.WorkingDirectory = linkInfo.WorkingDirectory;
+					shortcut.RunAsAdmin = linkInfo.RunAsAdmin;
+					shortcut.ShowWindowCommand = linkInfo.ShowWindowCommand;
+				}
+				catch (OperationCanceledException)
+				{
+					// Navigation away cancels the pending lookups
+				}
+				catch (Exception ex)
+				{
+					App.Logger.LogDebug(ex, "Failed to resolve a shortcut target.");
+				}
+				finally
+				{
+					if (entered)
+						shortcutHydrationGate.Release();
+				}
+			}, cancellationToken);
 		}
 
 		public static async Task<ListedItem?> GetFolder(
@@ -357,22 +407,20 @@ namespace Files.App.Utils.Storage
 			{
 				var isUrl = FileExtensionHelpers.IsWebLinkFile(findData.cFileName);
 
-				// Listing only needs the data stored in the link file; resolving the target
-				// can block on moved or unreachable targets and is done when the item is opened
-				var shInfo = await FileOperationsHelpers.ParseLinkAsync(itemPath, resolveTarget: false);
-				if (shInfo is null)
-					return null;
-
+				// The shell parse costs milliseconds per shortcut, so it must stay out of the listing loop.
+				// The item is built from the find data alone and the target is filled in afterwards; opening
+				// a shortcut without a resolved target falls back to launching the .lnk through the shell.
+				// A shortcut the shell cannot parse (corrupt or truncated) still shows up in the listing.
 				if (isGitRepo)
 				{
-					return new GitShortcutItem()
+					var gitShortcut = new GitShortcutItem()
 					{
-						PrimaryItemAttribute = shInfo.IsFolder ? StorageItemTypes.Folder : StorageItemTypes.File,
+						PrimaryItemAttribute = StorageItemTypes.File,
 						FileExtension = itemFileExtension,
 						IsHiddenItem = isHidden,
 						Opacity = opacity,
 						FileImage = null,
-						LoadFileIcon = !shInfo.IsFolder && itemThumbnailImgVis,
+						LoadFileIcon = itemThumbnailImgVis,
 						ItemNameRaw = itemName,
 						ItemDateModifiedReal = itemModifiedDate,
 						ItemDateAccessedReal = itemLastAccessDate,
@@ -381,24 +429,23 @@ namespace Files.App.Utils.Storage
 						ItemPath = itemPath,
 						FileSize = itemSize,
 						FileSizeBytes = itemSizeBytes,
-						TargetPath = shInfo.TargetPath,
-						Arguments = shInfo.Arguments,
-						WorkingDirectory = shInfo.WorkingDirectory,
-						RunAsAdmin = shInfo.RunAsAdmin,
-						ShowWindowCommand = shInfo.ShowWindowCommand,
 						IsUrl = isUrl,
 					};
+
+					QueueShortcutHydration(gitShortcut, itemPath, itemSizeBytes, cancellationToken);
+
+					return gitShortcut;
 				}
 				else
 				{
-					return new ShortcutItem(null)
+					var shortcut = new ShortcutItem(null)
 					{
-						PrimaryItemAttribute = shInfo.IsFolder ? StorageItemTypes.Folder : StorageItemTypes.File,
+						PrimaryItemAttribute = StorageItemTypes.File,
 						FileExtension = itemFileExtension,
 						IsHiddenItem = isHidden,
 						Opacity = opacity,
 						FileImage = null,
-						LoadFileIcon = !shInfo.IsFolder && itemThumbnailImgVis,
+						LoadFileIcon = itemThumbnailImgVis,
 						ItemNameRaw = itemName,
 						ItemDateModifiedReal = itemModifiedDate,
 						ItemDateAccessedReal = itemLastAccessDate,
@@ -407,13 +454,12 @@ namespace Files.App.Utils.Storage
 						ItemPath = itemPath,
 						FileSize = itemSize,
 						FileSizeBytes = itemSizeBytes,
-						TargetPath = shInfo.TargetPath,
-						Arguments = shInfo.Arguments,
-						WorkingDirectory = shInfo.WorkingDirectory,
-						RunAsAdmin = shInfo.RunAsAdmin,
-						ShowWindowCommand = shInfo.ShowWindowCommand,
 						IsUrl = isUrl,
 					};
+
+					QueueShortcutHydration(shortcut, itemPath, itemSizeBytes, cancellationToken);
+
+					return shortcut;
 				}
 			}
 			else if (App.LibraryManager.TryGetLibrary(itemPath, out var library))

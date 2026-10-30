@@ -2061,11 +2061,19 @@ namespace Files.App.ViewModels
 			ImageSource? groupImage = null;
 			if (item.PrimaryItemAttribute != StorageItemTypes.Folder || item.IsArchive)
 			{
-				var result = await FileThumbnailHelper.GetIconAsync(
-					item.ItemPath,
-					Constants.ShellIconSizes.Large,
-					false,
-					IconOptions.ReturnIconOnly);
+				byte[]? result = null;
+				try
+				{
+					result = await iconCacheService.GetIconAsync(item.ItemPath, item.IsFolder ? null : item.FileExtension, item.IsFolder, Constants.ShellIconSizes.Large);
+				}
+				catch
+				{
+					result = await FileThumbnailHelper.GetIconAsync(
+						item.ItemPath,
+						Constants.ShellIconSizes.Large,
+						false,
+						IconOptions.ReturnIconOnly);
+				}
 
 				if (result is not null && !item.IsShortcut)
 					groupImage = await dispatcherQueue.EnqueueOrInvokeAsync(() => result.ToBitmapAsync(), Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
@@ -3561,8 +3569,24 @@ namespace Files.App.ViewModels
 		private async Task PreloadIconsAsync(IEnumerable<ListedItem> items)
 		{
 			var iconSize = GetPreloadIconSize();
-			foreach (var item in items)
-				item.PreloadedIconData ??= await iconCacheService.GetIconAsync(item.ItemPath, item.IsFolder ? null : item.FileExtension, item.IsFolder, iconSize);
+			var list = items as IList<ListedItem> ?? items.ToList();
+			if (list.Count == 0)
+				return;
+
+			var options = new ParallelOptions { MaxDegreeOfParallelism = Math.Min(Environment.ProcessorCount * 2, 16) };
+			await Parallel.ForEachAsync(list, options, async (item, ct) =>
+			{
+				if (item.PreloadedIconData is not null)
+					return;
+
+				try
+				{
+					item.PreloadedIconData = await iconCacheService.GetIconAsync(item.ItemPath, item.IsFolder ? null : item.FileExtension, item.IsFolder, iconSize);
+				}
+				catch
+				{
+				}
+			});
 		}
 
 		public void CancelSearch()
