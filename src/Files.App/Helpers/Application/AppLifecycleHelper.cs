@@ -1,4 +1,4 @@
-// Copyright (c) Files Community
+﻿// Copyright (c) Files Community
 // Licensed under the MIT License.
 
 using Files.App.Helpers.Application;
@@ -76,6 +76,7 @@ namespace Files.App.Helpers
 				? appEnvironment
 				: AppEnvironment.Dev;
 
+
 		/// <summary>
 		/// Gets application package version.
 		/// </summary>
@@ -110,23 +111,44 @@ namespace Files.App.Helpers
 			// Start non-critical tasks without waiting; pinned loads alongside the others so its shell enumeration doesn't block them.
 			_ = Task.Run(async () =>
 			{
-				await SafetyExtensions.IgnoreExceptions(() => Task.WhenAll(
-					App.QuickAccessManager.InitializeAsync(),
-					OptionalTaskAsync(CloudDrivesManager.UpdateDrivesAsync(), generalSettingsService.ShowCloudDrivesSection),
-					App.LibraryManager.UpdateLibrariesAsync(),
-					OptionalTaskAsync(WSLDistroManager.UpdateDrivesAsync(), generalSettingsService.ShowWslSection),
-					OptionalTaskAsync(App.FileTagsManager.UpdateFileTagsAsync(), generalSettingsService.ShowFileTagsSection),
-					jumpListService.InitializeAsync()
-				), App.Logger);
+				try
+				{
+					await Task.WhenAll(
+						App.QuickAccessManager.InitializeAsync(),
+						OptionalTaskAsync(CloudDrivesManager.UpdateDrivesAsync(), generalSettingsService.ShowCloudDrivesSection),
+						App.LibraryManager.UpdateLibrariesAsync(),
+						OptionalTaskAsync(WSLDistroManager.UpdateDrivesAsync(), generalSettingsService.ShowWslSection),
+						OptionalTaskAsync(App.FileTagsManager.UpdateFileTagsAsync(), generalSettingsService.ShowFileTagsSection),
+						jumpListService.InitializeAsync()
+					);
+				}
+				catch (Exception ex)
+				{
+					App.Logger.LogWarning(ex, "AppLifecycleHelper first batch failed");
+				}
 
-				await SafetyExtensions.IgnoreExceptions(addItemService.InitializeAsync, App.Logger);
+				//Start the tasks separately to reduce resource contention
+				try
+				{
+					await Task.WhenAll(
+						addItemService.InitializeAsync(),
+						ContextMenu.WarmUpQueryContextMenuAsync()
+					);
+				}
+				catch (Exception ex)
+				{
+					App.Logger.LogWarning(ex, "AppLifecycleHelper second batch failed");
+				}
 			});
+
+			_ = Task.Run(FileTagsHelper.UpdateTagsDb);
 
 			_ = Task.Run(async () =>
 			{
 				// The follwing method invokes UI thread, so we run it in a separate task
 				await CheckAppUpdate();
 
+				await PeriodicallyCheckForUpdatesAsync();
 			});
 
 			static Task OptionalTaskAsync(Task task, bool condition)
@@ -137,6 +159,7 @@ namespace Files.App.Helpers
 				return Task.CompletedTask;
 			}
 
+			generalSettingsService.PropertyChanged += GeneralSettingsService_PropertyChanged;
 		}
 
 		/// <summary>
@@ -173,6 +196,31 @@ namespace Files.App.Helpers
 
 			if (IsAppUpdated)
 				await updateService.CheckAndUpdateFilesLauncherAsync();
+		}
+
+		/// <summary>
+		/// Periodically re-checks for updates while the app keeps running.
+		/// </summary>
+		public static async Task PeriodicallyCheckForUpdatesAsync()
+		{
+			var updateService = Ioc.Default.GetRequiredService<IUpdateService>();
+
+			var interval = AppEnvironment is AppEnvironment.SideloadPreview or AppEnvironment.StorePreview
+				? TimeSpan.FromHours(2)
+				: TimeSpan.FromHours(5);
+
+			using var timer = new PeriodicTimer(interval);
+			while (await timer.WaitForNextTickAsync())
+			{
+				if (updateService.IsUpdateAvailable)
+					break;
+
+				// CheckForUpdatesAsync resets IsUpdateAvailable, so skip while a download is in progress
+				if (updateService.IsUpdating)
+					continue;
+
+				await updateService.CheckForUpdatesAsync();
+			}
 		}
 
 		/// <summary>
@@ -272,7 +320,7 @@ namespace Files.App.Helpers
 		public static IServiceProvider ConfigureHost(AppModel appModel)
 		{
 			var services = new ServiceCollection();
-			var fileLoggerProvider = new FileLoggerProvider(Path.Combine(ApplicationData.Current.LocalFolder.Path, $"debug_{(Environment.IsPrivilegedProcess ? "privileged" : "unprivileged")}.log"));
+			var fileLoggerProvider = new FileLoggerProvider(Path.Combine(ApplicationData.Current.LocalFolder.Path, "debug.log"));
 
 			services.AddSingleton(fileLoggerProvider);
 
@@ -321,6 +369,7 @@ namespace Files.App.Helpers
 					.AddSingleton<ICommandManager, CommandManager>()
 					.AddSingleton<IModifiableCommandManager, ModifiableCommandManager>()
 					.AddSingleton<IStorageService, NativeStorageLegacyService>()
+					.AddSingleton<IFtpStorageService, FtpStorageService>()
 					.AddSingleton<IAddItemService, AddItemService>()
 					.AddSingleton<IPreviewPopupService, PreviewPopupService>()
 					.AddSingleton<IDateTimeFormatterFactory, DateTimeFormatterFactory>()
@@ -374,7 +423,7 @@ namespace Files.App.Helpers
 		}
 
 		/// <summary>
-		/// Saves the open tabs and selected index to the shared settings.
+		/// Saves saves all opened tabs to the app cache.
 		/// </summary>
 		public static void SaveSessionTabs()
 		{
@@ -592,5 +641,21 @@ namespace Files.App.Helpers
 			}
 		}
 
+		/// <summary>
+		/// Updates the visibility of the system tray icon
+		/// </summary>
+		private static void GeneralSettingsService_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+		{
+			if (sender is not IGeneralSettingsService generalSettingsService)
+				return;
+
+			if (e.PropertyName == nameof(IGeneralSettingsService.ShowSystemTrayIcon))
+			{
+				if (generalSettingsService.ShowSystemTrayIcon)
+					App.SystemTrayIcon?.Show();
+				else
+					App.SystemTrayIcon?.Hide();
+			}
+		}
 	}
 }
