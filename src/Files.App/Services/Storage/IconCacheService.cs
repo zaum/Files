@@ -13,16 +13,18 @@ namespace Files.App.Services
 {
 	internal sealed class IconCacheService : IIconCacheService
 	{
-		private readonly ConcurrentDictionary<string, byte[]?> _cache = new();
+		private readonly ConcurrentDictionary<string, Task<byte[]?>> _iconTasks = new();
 		private readonly ConcurrentDictionary<string, BitmapImage> _imageCache = new();
 
-		public async Task<byte[]?> GetIconAsync(string? itemPath, string? extension, bool isFolder, uint size)
+		public Task<byte[]?> GetIconAsync(string? itemPath, string? extension, bool isFolder, uint size)
 		{
 			var key = $"{(isFolder ? ":folder:" : (extension?.ToLowerInvariant() ?? ":noext:"))}:{size}:{App.AppModel.AppWindowDPI}";
 
-			if (_cache.TryGetValue(key, out var cached))
-				return cached;
+			return _iconTasks.GetOrAdd(key, _ => LoadIconAsync(extension, isFolder, size));
+		}
 
+		private async Task<byte[]?> LoadIconAsync(string? extension, bool isFolder, uint size)
+		{
 			var scaledSize = size * App.AppModel.AppWindowDPI;
 			var pixels = new[] { 16, 24, 32, 48, 64, 96, 128, 256 }.FirstOrDefault(value => value >= scaledSize, 256);
 			byte[]? icon;
@@ -37,7 +39,6 @@ namespace Files.App.Services
 				return null;
 			}
 
-			_cache.TryAdd(key, icon);
 			return icon;
 		}
 
@@ -64,7 +65,7 @@ namespace Files.App.Services
 
 		public void Clear()
 		{
-			_cache.Clear();
+			_iconTasks.Clear();
 			_imageCache.Clear();
 		}
 	}

@@ -25,7 +25,7 @@ namespace Files.App.Utils.Storage
 			Func<List<ListedItem>, Task> intermediateAction,
 			Dictionary<string, BitmapImage>? defaultIconPairs = null)
 		{
-			var sampler = new IntervalSampler(500);
+			var sampler = new IntervalSampler(1000);
 			var tempList = new List<ListedItem>();
 			uint count = 0;
 			var firstRound = true;

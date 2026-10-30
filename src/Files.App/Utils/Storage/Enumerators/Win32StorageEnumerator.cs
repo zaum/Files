@@ -30,7 +30,7 @@ namespace Files.App.Utils.Storage
 			Func<List<ListedItem>, Task> intermediateAction
 		)
 		{
-			var sampler = new IntervalSampler(500);
+			var sampler = new IntervalSampler(1000);
 			// Intermediate flushes merge in sorted, so an early first paint costs no reshuffle later
 			var firstBatchSampler = new IntervalSampler(25);
 			var hasFlushedFirstBatch = false;

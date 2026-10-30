@@ -2506,10 +2506,8 @@ namespace Files.App.ViewModels
 						{
 							filesAndFolders.AddRange(intermediateList);
 
-							// The stable sort lands new items in final position without reordering visible ones; capped for huge listings
-							if (filesAndFolders.Count <= 10_000)
-								await OrderFilesAndFoldersAsync();
-
+							// Skip the intermediate sort: re-sorting the whole accumulated list on every flush is O(n log n)
+							// per batch. The final sort below still puts everything in the right order.
 							await ApplyFilesAndFoldersChangesAsync();
 						});
 
@@ -2572,10 +2570,8 @@ namespace Files.App.ViewModels
 						{
 							filesAndFolders.AddRange(intermediateList);
 
-							// The stable sort lands new items in final position without reordering visible ones; capped for huge listings
-							if (filesAndFolders.Count <= 10_000)
-								await OrderFilesAndFoldersAsync();
-
+							// Skip the intermediate sort: re-sorting the whole accumulated list on every flush is O(n log n)
+							// per batch. The final sort below still puts everything in the right order.
 							await ApplyFilesAndFoldersChangesAsync();
 						});
 
@@ -2598,15 +2594,41 @@ namespace Files.App.ViewModels
 
 		private void CheckForSolutionFile()
 		{
-			SolutionFilePath = filesAndFolders.ToList().AsParallel()
-				.Where(item => FileExtensionHelpers.HasExtension(item.FileExtension, ".sln", ".slnx"))
-				.FirstOrDefault()?.ItemPath;
+			// Avoid the ToList() copy and PLINQ overhead on every folder switch; a simple
+			// early-exit scan is cheaper for the common case and still finds the first solution.
+			string? solutionPath = null;
+			foreach (var item in filesAndFolders)
+			{
+				if (FileExtensionHelpers.HasExtension(item.FileExtension, ".sln", ".slnx"))
+				{
+					solutionPath = item.ItemPath;
+					break;
+				}
+			}
+
+			SolutionFilePath = solutionPath;
 		}
 
 		private async Task UpdateDesktopIniAsync(string directoryPath, CancellationToken cancellationToken)
 		{
+			var desktopIniPath = Path.Combine(directoryPath, "desktop.ini");
+
+			// Most folders have no desktop.ini; avoid spawning a worker (and a possible SMB wait) for them.
+			if (!File.Exists(desktopIniPath))
+			{
+				await dispatcherQueue.EnqueueOrInvokeAsync(() =>
+				{
+					if (cancellationToken.IsCancellationRequested || WorkingDirectory != directoryPath)
+						return;
+
+					DesktopIni = null;
+					CheckForBackgroundImage();
+				}, Microsoft.UI.Dispatching.DispatcherQueuePriority.Low);
+				return;
+			}
+
 			// File.Exists and ReadLines can wait for the SMB timeout on an unavailable share.
-			var data = await Task.Run(() => WindowsIniService.GetData(Path.Combine(directoryPath, "desktop.ini")));
+			var data = await Task.Run(() => WindowsIniService.GetData(desktopIniPath));
 			await dispatcherQueue.EnqueueOrInvokeAsync(() =>
 			{
 				if (cancellationToken.IsCancellationRequested || WorkingDirectory != directoryPath)
