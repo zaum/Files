@@ -1137,11 +1137,22 @@ namespace Files.App.ViewModels
 					// concurrent watcher removals (e.g. emptying the Recycle Bin) otherwise leave the last item painted.
 					var filesAndFoldersLocal = filesAndFolders?.ToList() ?? new List<ListedItem>();
 
-					var displayedFilesAndFolders = string.IsNullOrEmpty(filter)
-						? filesAndFoldersLocal
-						: await Task.Run(() => filesAndFoldersLocal.Where(x => MatchesFilter(x, filter)).ToList(), addFilesCTS.Token);
+					List<ListedItem> displayedFilesAndFolders;
+					int displayedFoldersCount = 0;
+					if (string.IsNullOrEmpty(filter))
+					{
+						displayedFilesAndFolders = filesAndFoldersLocal;
+					}
+					else
+					{
+						displayedFilesAndFolders = await Task.Run(() => filesAndFoldersLocal.Where(x => MatchesFilter(x, filter)).ToList(), addFilesCTS.Token);
+					}
 
-					var displayedFoldersCount = displayedFilesAndFolders.Count(x => x.PrimaryItemAttribute == StorageItemTypes.Folder && !x.IsArchive);
+					foreach (var item in displayedFilesAndFolders)
+					{
+						if (item.PrimaryItemAttribute == StorageItemTypes.Folder && !item.IsArchive)
+							displayedFoldersCount++;
+					}
 
 					await dispatcherQueue.EnqueueOrInvokeAsync(() =>
 					{

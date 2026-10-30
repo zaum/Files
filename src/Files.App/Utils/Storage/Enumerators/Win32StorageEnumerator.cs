@@ -109,7 +109,7 @@ namespace Files.App.Utils.Storage
 					if (intermediateAction is not null &&
 						(hasFlushedFirstBatch
 							? sampler.CheckNow()
-							: tempList.Count > 0 && firstBatchSampler.CheckNow()))
+							: tempList.Count >= 50 || (tempList.Count > 0 && firstBatchSampler.CheckNow())))
 					{
 						hasFlushedFirstBatch = true;
 						await intermediateAction(tempList);
