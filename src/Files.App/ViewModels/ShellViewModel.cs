@@ -940,7 +940,9 @@ namespace Files.App.ViewModels
 			if (filesAndFolders.Count >= 100)
 				AppMemoryHelper.RequestTrim();
 			filesAndFolders.Clear();
-			FilesAndFolders.Clear();
+			// FilesAndFolders (the visible collection) is deliberately left alone here: clearing it blanks the
+			// pane for the whole enumeration, which reads as a slow, flashing folder switch. The apply step
+			// replaces it atomically once the new items are ready, and the failure paths clear it explicitly.
 			FoldersCount = 0;
 			CancelSearch();
 		}
@@ -2215,7 +2217,10 @@ namespace Files.App.ViewModels
 			CancelLoadAndClearFiles();
 
 			if (string.IsNullOrEmpty(path))
+			{
+				FilesAndFolders.Clear();
 				return;
+			}
 
 			try
 			{
@@ -2326,6 +2331,8 @@ namespace Files.App.ViewModels
 				// Enumeration failed
 				case -1:
 				default:
+					// Nothing will replace the listing, so don't leave the previous folder's items on screen
+					FilesAndFolders.Clear();
 					break;
 			}
 
