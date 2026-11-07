@@ -1,6 +1,8 @@
 // Copyright (c) Files Community
 // Licensed under the MIT License.
 
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using Windows.Devices.Enumeration;
 using Windows.Devices.Portable;
 using Windows.Storage;
@@ -12,6 +14,31 @@ namespace Files.App.Utils.Storage
 {
 	public static class DriveHelpers
 	{
+		private static readonly ConcurrentDictionary<string, SystemIO.DriveType> driveTypeCache = new(StringComparer.OrdinalIgnoreCase);
+
+		/// <summary>
+		/// Gets the drive type of the volume containing the path, cached per volume root.
+		/// The answer never changes while the app runs, so repeated DriveInfo probes on navigation paths are wasted work.
+		/// </summary>
+		public static SystemIO.DriveType GetDriveType(string? path)
+		{
+			if (string.IsNullOrEmpty(path))
+				return SystemIO.DriveType.Unknown;
+
+			var root = SystemIO.Path.GetPathRoot(path);
+			if (string.IsNullOrEmpty(root))
+				return SystemIO.DriveType.Unknown;
+
+			return driveTypeCache.GetOrAdd(root, static root =>
+			{
+				try { return (SystemIO.DriveType)GetDriveTypeW(root); }
+				catch { return SystemIO.DriveType.Unknown; }
+			});
+		}
+
+		[DllImport("kernel32.dll", EntryPoint = "GetDriveTypeW", CharSet = CharSet.Unicode)]
+		private static extern uint GetDriveTypeW(string lpRootPathName);
+
 		public static async void EjectDeviceAsync(string path)
 		{
 			await ContextMenu.InvokeVerb("eject", path);
@@ -108,7 +135,7 @@ namespace Files.App.Utils.Storage
 			try
 			{
 				return path.StartsWith(@"\\", StringComparison.Ordinal) ||
-					new SystemIO.DriveInfo(path).DriveType is SystemIO.DriveType.Network;
+					GetDriveType(path) is SystemIO.DriveType.Network;
 			}
 			catch
 			{
@@ -132,11 +159,7 @@ namespace Files.App.Utils.Storage
 			if (string.IsNullOrEmpty(root))
 				return Task.FromResult(false);
 
-			return Task.Run(() =>
-			{
-				try { return new SystemIO.DriveInfo(root).DriveType == SystemIO.DriveType.Network; }
-				catch { return false; }
-			});
+			return Task.Run(() => GetDriveType(root) == SystemIO.DriveType.Network);
 		}
 
 		public static async Task<StorageItemThumbnail?> GetThumbnailAsync(StorageFolder folder)

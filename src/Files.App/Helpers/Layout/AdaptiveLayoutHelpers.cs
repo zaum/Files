@@ -1,8 +1,10 @@
 // Copyright (c) Files Community
 // Licensed under the MIT License.
 
+using Files.App.Utils.Storage;
 using Files.App.ViewModels.Previews;
 using Files.Shared.Helpers;
+using System.Collections.Concurrent;
 
 namespace Files.App.Helpers
 {
@@ -12,6 +14,10 @@ namespace Files.App.Helpers
 		private static IContentPageContext ContentPageContext { get; } = Ioc.Default.GetRequiredService<IContentPageContext>();
 		private static IWindowsIniService WindowsIniService { get; } = Ioc.Default.GetRequiredService<IWindowsIniService>();
 
+		// Prediction is only a starting guess; the post-enumeration adaptive pass corrects it from the real items.
+		// Remembering it per folder avoids a second, synchronous directory scan on every navigation.
+		private static readonly ConcurrentDictionary<string, FolderLayoutModes> predictedLayouts = new(StringComparer.OrdinalIgnoreCase);
+
 		// Predicts the layout from desktop.ini or a small directory sample, so navigation opens in the right layout without a post-enumeration switch
 		public static bool TryPredictLayout(string? path, out FolderLayoutModes layout)
 		{
@@ -20,11 +26,14 @@ namespace Files.App.Helpers
 			if (path is null)
 				return false;
 
+			if (predictedLayouts.TryGetValue(path, out layout))
+				return true;
+
 			try
 			{
 				var root = SystemIO.Path.GetPathRoot(path);
 				if (string.IsNullOrEmpty(root) || root.StartsWith(@"\\", StringComparison.Ordinal) ||
-					new SystemIO.DriveInfo(root).DriveType is SystemIO.DriveType.Network or SystemIO.DriveType.NoRootDirectory)
+					DriveHelpers.GetDriveType(root) is SystemIO.DriveType.Network or SystemIO.DriveType.NoRootDirectory)
 					return false;
 
 				var viewStateSection = WindowsIniService.GetData(SystemIO.Path.Combine(path, "desktop.ini"))
@@ -33,6 +42,7 @@ namespace Files.App.Helpers
 				{
 					var viewMode = viewStateSection.Parameters.FirstOrDefault(x => x.Key == "Mode").Value;
 					layout = viewMode is "Pictures" or "Videos" ? FolderLayoutModes.GridView : FolderLayoutModes.DetailsView;
+					predictedLayouts[path] = layout;
 					return true;
 				}
 
@@ -49,6 +59,7 @@ namespace Files.App.Helpers
 					return false;
 
 				layout = 100f * media / total > 60f ? FolderLayoutModes.GridView : FolderLayoutModes.DetailsView;
+				predictedLayouts[path] = layout;
 				return true;
 			}
 			catch (Exception ex) when (ex is SystemIO.IOException or UnauthorizedAccessException or ArgumentException)

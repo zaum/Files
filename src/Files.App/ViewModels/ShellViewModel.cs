@@ -1154,7 +1154,7 @@ namespace Files.App.ViewModels
 							displayedFoldersCount++;
 					}
 
-					await dispatcherQueue.EnqueueOrInvokeAsync(() =>
+					await dispatcherQueue.EnqueueOrInvokeAsync(async () =>
 					{
 						try
 						{
@@ -1163,21 +1163,86 @@ namespace Files.App.ViewModels
 
 							pendingSearchResults.Clear();
 
-							FilesAndFolders.BeginBulkOperation();
-							try
+							// Small-icon layouts: put the shared per-type images into the very first frame instead of
+							// letting them pop in from a low-priority pass after realization. The lookups run together
+							// and are only awaited for a short, bounded time: a slow icon handler must not hold back
+							// the listing itself, and whatever is still missing arrives through the per-item path.
+							var iconSize = GetPreloadIconSize();
+							if (iconSize < 48 || UserSettingsService.FoldersSettingsService.ShowThumbnails == false)
 							{
-								FilesAndFolders.Clear();
-								FilesAndFolders.AddRange(displayedFilesAndFolders);
-								FoldersCount = displayedFoldersCount;
+								var imagesByType = new Dictionary<string, Task<BitmapImage?>>(StringComparer.OrdinalIgnoreCase);
+								foreach (var item in displayedFilesAndFolders)
+								{
+									if (item.FileImage is not null)
+										continue;
 
-								if (folderSettings.DirectoryGroupOption != GroupOption.None)
-									OrderGroups();
+									var typeKey = item.IsFolder ? ":folder:" : item.FileExtension ?? string.Empty;
+									if (!imagesByType.ContainsKey(typeKey))
+										imagesByType[typeKey] = iconCacheService.GetIconImageAsync(item.ItemPath, item.FileExtension, item.IsFolder, iconSize);
+								}
+
+								// Plain document icon for handlers (Acrobat, for one) that only extract from a real file
+								var fallbackTask = iconCacheService.GetIconImageAsync(null, null, false, iconSize);
+
+								// Icons are best-effort here: a failed or slow lookup must never stop the listing
+								try { await Task.WhenAll(imagesByType.Values.Append(fallbackTask)).WaitAsync(TimeSpan.FromMilliseconds(120)); }
+								catch (Exception) { }
+
+								var fallback = fallbackTask.IsCompletedSuccessfully ? fallbackTask.Result : null;
+								foreach (var item in displayedFilesAndFolders)
+								{
+									if (item.FileImage is not null)
+										continue;
+
+									var typeKey = item.IsFolder ? ":folder:" : item.FileExtension ?? string.Empty;
+									if (!imagesByType.TryGetValue(typeKey, out var task) || !task.IsCompletedSuccessfully)
+										continue;
+
+									var image = task.Result ?? (item.IsFolder ? null : fallback);
+									if (image is not null)
+										item.FileImage = image;
+								}
 							}
-							finally
+
+							// A Reset notification makes the view tear down and re-realize every container, which is the
+							// most expensive part of a folder switch. Skip it when this apply would show exactly the items
+							// already on screen - the usual case for the final apply after an intermediate flush.
+							var unchanged = folderSettings.DirectoryGroupOption == GroupOption.None
+								&& FilesAndFolders.Count == displayedFilesAndFolders.Count;
+							if (unchanged)
 							{
-								// Trigger CollectionChanged with NotifyCollectionChangedAction.Reset
-								// once loading is completed so that UI can be updated
-								FilesAndFolders.EndBulkOperation();
+								for (var i = 0; i < displayedFilesAndFolders.Count; i++)
+								{
+									if (!ReferenceEquals(FilesAndFolders[i], displayedFilesAndFolders[i]))
+									{
+										unchanged = false;
+										break;
+									}
+								}
+							}
+
+							if (unchanged)
+							{
+								FoldersCount = displayedFoldersCount;
+							}
+							else
+							{
+								FilesAndFolders.BeginBulkOperation();
+								try
+								{
+									FilesAndFolders.Clear();
+									FilesAndFolders.AddRange(displayedFilesAndFolders);
+									FoldersCount = displayedFoldersCount;
+
+									if (folderSettings.DirectoryGroupOption != GroupOption.None)
+										OrderGroups();
+								}
+								finally
+								{
+									// Trigger CollectionChanged with NotifyCollectionChangedAction.Reset
+									// once loading is completed so that UI can be updated
+									FilesAndFolders.EndBulkOperation();
+								}
 							}
 
 							UpdateEmptyTextType();
@@ -1431,9 +1496,11 @@ namespace Files.App.ViewModels
 				}
 			}
 
-			if (item.PreloadedIconData is not null && item.FileImage is null)
+			if (item.FileImage is null)
 			{
-				// Fetched at the current layout's size and scale so the placeholder is pixel-identical to the final icon
+				// Always paint the shared per-extension icon at realization. Gating this on PreloadedIconData made the
+				// placeholder depend on whether the enumeration-time preload had already completed, so an item could stay
+				// blank until its (slower) individual icon request finished.
 				var iconSize = GetPreloadIconSize();
 				await dispatcherQueue.EnqueueOrInvokeAsync(async () =>
 				{
@@ -1473,6 +1540,10 @@ namespace Files.App.ViewModels
 					cancellationToken.ThrowIfCancellationRequested();
 					loadNonCachedThumbnail = true;
 				}
+
+				// Resolve the shared per-extension icon here instead of relying on the enumeration-time preload having
+				// finished; it is cached, so this is a cache hit for every item after the first of its kind.
+				item.PreloadedIconData ??= await iconCacheService.GetIconAsync(item.ItemPath, item.FileExtension, item.IsFolder, thumbnailSize);
 
 				// Skip the per-item icon fetch when the preloaded per-extension icon cannot differ from the final icon
 				var preloadedIconIsFinal = item.PreloadedIconData is not null && !item.IsFolder &&
@@ -1647,9 +1718,9 @@ namespace Files.App.ViewModels
 
 				await dispatcherQueue.EnqueueOrInvokeAsync(() =>
 				{
-					item.ImageDimensions = properties["System.Image.Dimensions"]?.ToString() ?? string.Empty;
-					item.FileVersion = properties["System.FileVersion"]?.ToString() ?? string.Empty;
-					item.MediaDuration = ulong.TryParse(properties["System.Media.Duration"]?.ToString(), out ulong duration)
+					item.ImageDimensions = GetPropertyValue(properties, "System.Image.Dimensions")?.ToString() ?? string.Empty;
+					item.FileVersion = GetPropertyValue(properties, "System.FileVersion")?.ToString() ?? string.Empty;
+					item.MediaDuration = ulong.TryParse(GetPropertyValue(properties, "System.Media.Duration")?.ToString(), out ulong duration)
 							? TimeSpan.FromTicks((long)duration).ToString(@"hh\:mm\:ss")
 							: string.Empty;
 
@@ -1762,9 +1833,9 @@ namespace Files.App.ViewModels
 									item.FileFRN = fileFRN;
 									item.FileTags = fileTag;
 									item.IsElevationRequired = isElevationRequired;
-									item.ImageDimensions = properties?["System.Image.Dimensions"]?.ToString() ?? string.Empty;
-									item.FileVersion = properties?["System.FileVersion"]?.ToString() ?? string.Empty;
-									item.MediaDuration = ulong.TryParse(properties?["System.Media.Duration"]?.ToString(), out ulong duration)
+									item.ImageDimensions = GetPropertyValue(properties, "System.Image.Dimensions")?.ToString() ?? string.Empty;
+									item.FileVersion = GetPropertyValue(properties, "System.FileVersion")?.ToString() ?? string.Empty;
+									item.MediaDuration = ulong.TryParse(GetPropertyValue(properties, "System.Media.Duration")?.ToString(), out ulong duration)
 											? TimeSpan.FromTicks((long)duration).ToString(@"hh\:mm\:ss")
 											: string.Empty;
 
@@ -1823,8 +1894,10 @@ namespace Files.App.ViewModels
 								var fileFRN = await FileTagsHelper.GetFileFRN(matchingStorageFolder);
 								var fileTag = await Task.Run(() => FileTagsHelper.ReadFileTag(item.GetRequiredPath()));
 
-								// Folder extended properties only carry drive storage details, irrelevant on a network subfolder
-								var extraProperties = isItemNetwork ? null : await GetExtraProperties(matchingStorageFolder);
+								// Drive storage details are only rendered for drive roots (removable drives);
+								// querying them for every ordinary subfolder is wasted per-item work.
+								var isDriveRoot = string.Equals(Path.GetPathRoot(item.ItemPath), item.ItemPath, StringComparison.OrdinalIgnoreCase);
+								var extraProperties = isItemNetwork || !isDriveRoot ? null : await GetExtraProperties(matchingStorageFolder);
 
 								token.ThrowIfCancellationRequested();
 
@@ -2315,9 +2388,10 @@ namespace Files.App.ViewModels
 
 			try
 			{
-				// Special handling for network drives
+				// Special handling for network drives. The drive type is cached per volume root, so this
+				// no longer costs a DriveInfo probe on every folder switch.
 				if (!isNetwork)
-					isNetdisk = await Task.Run(() => new DriveInfo(path).DriveType == System.IO.DriveType.Network);
+					isNetdisk = await Task.Run(() => DriveHelpers.GetDriveType(path) == System.IO.DriveType.Network);
 			}
 			catch { }
 
@@ -2353,6 +2427,7 @@ namespace Files.App.ViewModels
 				})
 				.WithTimeoutAsync(TimeSpan.FromSeconds(5));
 			}
+
 
 			if (!enumFromStorageFolder && hFile is not null && !hFile.IsInvalid)
 			{
@@ -2498,18 +2573,38 @@ namespace Files.App.ViewModels
 						return -1;
 					}
 
+
 					return 1;
 				}
 				else
 				{
-					// Cache the resolved folder before the listing so the cloud placeholder probe below
-					// can run while the enumeration is still in flight instead of after it.
-					currentStorageFolder ??= await FilesystemTasks.Wrap(() => StorageFileExtensions.DangerousGetFolderWithPathFromPathAsync(path));
-					rootFolder ??= currentStorageFolder?.Item;
-					var cloudSyncTask = rootFolder is not null &&
-						!string.Equals(path, Constants.UserEnvironmentPaths.RecycleBinPath, StringComparison.OrdinalIgnoreCase)
-							? CheckCloudDriveSyncStatusAsync(rootFolder)
-							: null;
+					// Resolve the shell folder and probe the cloud placeholder state while the Win32 listing runs.
+					// Both are independent of the enumeration and each costs a cross-process round trip, so awaiting
+					// them up front would add their full latency to every folder switch.
+					var storageFolderTask = currentStorageFolder is null
+						? FilesystemTasks.Wrap(() => StorageFileExtensions.DangerousGetFolderWithPathFromPathAsync(path))
+						: null;
+
+					async Task ResolveFolderAndCloudSyncAsync()
+					{
+						if (storageFolderTask is not null)
+							currentStorageFolder = await storageFolderTask;
+
+						rootFolder ??= currentStorageFolder?.Item;
+						if (rootFolder is null)
+							return;
+
+						if (rootFolder.DisplayName is not null)
+							currentFolder.ItemNameRaw = rootFolder.DisplayName;
+
+						if (string.Equals(path, Constants.UserEnvironmentPaths.RecycleBinPath, StringComparison.OrdinalIgnoreCase))
+							return;
+
+						enumeratedCloudSyncStatus = await CheckCloudDriveSyncStatusAsync(rootFolder);
+						currentFolder.SyncStatusUI = CloudDriveSyncStatusUI.FromCloudDriveSyncStatus(enumeratedCloudSyncStatus.Value);
+					}
+
+					var folderAndCloudTask = ResolveFolderAndCloudSyncAsync();
 
 					await Task.Run(async () =>
 					{
@@ -2525,7 +2620,7 @@ namespace Files.App.ViewModels
 						filesAndFolders.AddRange(fileList);
 
 						await OrderFilesAndFoldersAsync();
-						await ApplyFilesAndFoldersChangesAsync();
+						_ = ApplyFilesAndFoldersChangesAsync();
 						// Not awaited here: with Low priority these don't run until the UI thread goes idle
 						// after the final list update, which would delay load completion and watcher setup.
 						// The desktop.ini task is awaited before applying the adaptive layout, which reads DesktopIni.
@@ -2533,17 +2628,12 @@ namespace Files.App.ViewModels
 						desktopIniUpdateTask = UpdateDesktopIniAsync(workingDirectory, cancellationToken);
 					});
 
-					if (rootFolder is not null)
-					{
-						if (rootFolder.DisplayName is not null)
-							currentFolder.ItemNameRaw = rootFolder.DisplayName;
+					// The items are already on screen, so the progress indicator must not keep spinning while the
+					// shell folder resolution and the cloud placeholder probe finish their round trips.
+					IsLoadingItems = false;
 
-						if (cloudSyncTask is not null)
-						{
-							enumeratedCloudSyncStatus = await cloudSyncTask;
-							currentFolder.SyncStatusUI = CloudDriveSyncStatusUI.FromCloudDriveSyncStatus(enumeratedCloudSyncStatus.Value);
-						}
-					}
+					await folderAndCloudTask;
+
 
 					return 0;
 				}
@@ -2583,13 +2673,13 @@ namespace Files.App.ViewModels
 
 							// Skip the intermediate sort: re-sorting the whole accumulated list on every flush is O(n log n)
 							// per batch. The final sort below still puts everything in the right order.
-							await ApplyFilesAndFoldersChangesAsync();
+							_ = ApplyFilesAndFoldersChangesAsync();
 						});
 
 					filesAndFolders.AddRange(finalList);
 
 					await OrderFilesAndFoldersAsync();
-					await ApplyFilesAndFoldersChangesAsync();
+					_ = ApplyFilesAndFoldersChangesAsync();
 				}, cancellationToken);
 
 				IsLocationUnavailable = false;
@@ -2751,10 +2841,31 @@ namespace Files.App.ViewModels
 			return (CloudDriveSyncStatus)syncStatus;
 		}
 
+		private static object? GetPropertyValue(IDictionary<string, object>? properties, string key)
+			=> properties is not null && properties.TryGetValue(key, out var value) ? value : null;
+
 		private async Task<FilesystemResult<IDictionary<string, object>>?> GetExtraProperties(IStorageItem matchingStorageItem)
 		{
 			if (matchingStorageItem is BaseStorageFile file && file.Properties != null)
-				return await FilesystemTasks.Wrap(() => file.Properties.RetrievePropertiesAsync((string[])["System.Image.Dimensions", "System.Media.Duration", "System.FileVersion"]).AsTask());
+			{
+				// Ask only for the properties this file type can actually have. Requesting image dimensions,
+				// media duration and file version for every file makes the shell open and parse each one,
+				// and the answer is empty for them anyway.
+				var extension = file.FileType;
+				var properties = new List<string>(3);
+				if (FileExtensionHelpers.IsImageFile(extension))
+					properties.Add("System.Image.Dimensions");
+				if (FileExtensionHelpers.IsAudioFile(extension) || FileExtensionHelpers.IsVideoFile(extension))
+					properties.Add("System.Media.Duration");
+				if (FileExtensionHelpers.IsExecutableFile(extension) ||
+					string.Equals(extension, ".dll", StringComparison.OrdinalIgnoreCase))
+					properties.Add("System.FileVersion");
+
+				if (properties.Count == 0)
+					return null;
+
+				return await FilesystemTasks.Wrap(() => file.Properties.RetrievePropertiesAsync(properties.ToArray()).AsTask());
+			}
 
 			else if (matchingStorageItem is BaseStorageFolder folder && folder.Properties != null)
 				return await FilesystemTasks.Wrap(() => folder.Properties.RetrievePropertiesAsync((string[])["System.FreeSpace", "System.Capacity", "System.SFGAOFlags"]).AsTask());

@@ -1387,7 +1387,7 @@ namespace Files.App.Views.Layouts
 				UpdateItemToolTip(container, listedItem.ItemTooltipText);
 				InitializeDrag(container, listedItem);
 
-				if (listedItem.PreloadedIconData is not null && listedItem.FileImage is null)
+				if (listedItem.FileImage is null)
 					EnqueueItemLoad(container, listedItem, shellViewModel => shellViewModel.ApplyCachedThumbnailOrPreloadedIconAsync(listedItem));
 
 				if (!listedItem.ItemPropertiesInitialized)

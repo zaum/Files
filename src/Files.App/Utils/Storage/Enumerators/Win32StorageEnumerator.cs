@@ -32,7 +32,7 @@ namespace Files.App.Utils.Storage
 		{
 			var sampler = new IntervalSampler(1000);
 			// Intermediate flushes merge in sorted, so an early first paint costs no reshuffle later
-			var firstBatchSampler = new IntervalSampler(25);
+			var firstBatchSampler = new IntervalSampler(100);
 			var hasFlushedFirstBatch = false;
 			var tempList = new List<ListedItem>();
 			var count = 0;
@@ -65,7 +65,13 @@ namespace Files.App.Utils.Storage
 							if (file is not null)
 							{
 								var filePath = file.ItemPath!;
-								file.PreloadedIconData = await iconCacheService.GetIconAsync(file.ItemPath, file.FileExtension, false, iconSize);
+								// Fire-and-forget icon preload so enumeration isn't blocked on the server IPC.
+								var __iconSize = iconSize;
+								_ = iconCacheService.GetIconAsync(file.ItemPath, file.FileExtension, false, __iconSize).ContinueWith(t =>
+								{
+									if (t.Status == TaskStatus.RanToCompletion && t.Result is not null)
+										file.PreloadedIconData = t.Result;
+								}, TaskScheduler.Default);
 								tempList.Add(file);
 								++count;
 
@@ -81,7 +87,11 @@ namespace Files.App.Utils.Storage
 								if (folder is not null)
 								{
 									var folderPath = folder.ItemPath!;
-									folder.PreloadedIconData = await iconCacheService.GetIconAsync(folder.ItemPath, null, true, iconSize);
+									_ = iconCacheService.GetIconAsync(folder.ItemPath, null, true, iconSize).ContinueWith(t =>
+									{
+										if (t.Status == TaskStatus.RanToCompletion && t.Result is not null)
+											folder.PreloadedIconData = t.Result;
+									}, TaskScheduler.Default);
 									tempList.Add(folder);
 									++count;
 
@@ -112,9 +122,7 @@ namespace Files.App.Utils.Storage
 							: tempList.Count >= 50 || (tempList.Count > 0 && firstBatchSampler.CheckNow())))
 					{
 						hasFlushedFirstBatch = true;
-						await intermediateAction(tempList);
-
-						// clear the temporary list every time we do an intermediate action
+						_ = intermediateAction(tempList);
 						tempList.Clear();
 					}
 				} while (Win32PInvoke.FindNextFile(rawHandle, out findData));

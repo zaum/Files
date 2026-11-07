@@ -15,45 +15,34 @@ namespace Files.Storage
 	public partial class STATask
 	{
 		private const int PooledThreadCount = 12;
+		private const int PriorityThreadCount = 4;
 
 		private static readonly Channel<Action> _pooledQueue = Channel.CreateUnbounded<Action>();
+		private static readonly Channel<Action> _priorityQueue = Channel.CreateUnbounded<Action>();
 		private static bool _poolStarted;
+		private static bool _priorityPoolStarted;
 
 		/// <summary>
 		/// Schedules the specified work on a shared pool of persistent STA threads, avoiding per-call thread creation.
+		/// Priority work (icons needed for the first paint) runs on a separate small pool, so it never has to
+		/// wait behind thumbnail generation still queued for a folder the user has already left.
 		/// </summary>
 		/// <typeparam name="T">The type of the result returned by the function.</typeparam>
 		/// <param name="func">The work to execute on an STA pool thread.</param>
 		/// <param name="logger">A logger to capture any exception that occurs during execution.</param>
+		/// <param name="priority">Whether the work is needed for the current folder's first paint.</param>
 		/// <returns>A <see cref="Task{T}"/> that represents the scheduled work.</returns>
-		public static Task<T> RunPooled<T>(Func<T> func, ILogger? logger)
+		public static Task<T> RunPooled<T>(Func<T> func, ILogger? logger, bool priority = false)
 		{
-			if (!Interlocked.CompareExchange(ref _poolStarted, true, false))
-			{
-				for (int i = 0; i < PooledThreadCount; i++)
-				{
-					Thread thread =
-						new(() =>
-						{
-							PInvoke.OleInitialize();
-
-							// Consume synchronously: awaiting here would resume on an MTA thread pool thread, losing the STA apartment
-							var reader = _pooledQueue.Reader;
-							while (reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
-								while (reader.TryRead(out var work))
-									work();
-						});
-
-					thread.IsBackground = true;
-					thread.SetApartmentState(ApartmentState.STA);
-					thread.Name = $"STATask pool {i}";
-					thread.Start();
-				}
-			}
+			var queue = priority ? _priorityQueue : _pooledQueue;
+			if (priority)
+				EnsurePoolStarted(_priorityQueue, PriorityThreadCount, "STATask priority", ref _priorityPoolStarted);
+			else
+				EnsurePoolStarted(_pooledQueue, PooledThreadCount, "STATask pool", ref _poolStarted);
 
 			var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-			_pooledQueue.Writer.TryWrite(() =>
+			queue.Writer.TryWrite(() =>
 			{
 				try
 				{
@@ -67,6 +56,32 @@ namespace Files.Storage
 			});
 
 			return tcs.Task;
+		}
+
+		private static void EnsurePoolStarted(Channel<Action> queue, int threadCount, string name, ref bool started)
+		{
+			if (Interlocked.CompareExchange(ref started, true, false))
+				return;
+
+			for (int i = 0; i < threadCount; i++)
+			{
+				Thread thread =
+					new(() =>
+					{
+						PInvoke.OleInitialize();
+
+						// Consume synchronously: awaiting here would resume on an MTA thread pool thread, losing the STA apartment
+						var reader = queue.Reader;
+						while (reader.WaitToReadAsync().AsTask().GetAwaiter().GetResult())
+							while (reader.TryRead(out var work))
+								work();
+					});
+
+				thread.IsBackground = true;
+				thread.SetApartmentState(ApartmentState.STA);
+				thread.Name = $"{name} {i}";
+				thread.Start();
+			}
 		}
 
 		/// <summary>
