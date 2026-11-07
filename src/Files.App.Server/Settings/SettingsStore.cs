@@ -127,13 +127,38 @@ internal sealed class SettingsStore
 
 	internal SettingsValue[] ReadValues()
 	{
+		SettingsValue[] result;
 		lock (gate)
-			return SettingsValueCodec.EncodeObject(Read());
+			result = SettingsValueCodec.EncodeObject(Read());
+		return result;
 	}
 
-	internal bool Set(string key, SettingsValue[] value, bool remove)
+	internal string ReadJson()
 	{
-		var element = remove ? default : SettingsValueCodec.Decode(value);
+		lock (gate)
+		{
+			var data = Read();
+			if (data.Count == 0)
+				return "{}";
+			using var stream = new System.IO.MemoryStream();
+			using (var writer = new Utf8JsonWriter(stream))
+			{
+				writer.WriteStartObject();
+				foreach (var pair in data)
+				{
+					writer.WritePropertyName(pair.Key);
+					pair.Value.WriteTo(writer);
+				}
+				writer.WriteEndObject();
+				writer.Flush();
+			}
+			return System.Text.Encoding.UTF8.GetString(stream.ToArray());
+		}
+	}
+
+	internal bool Set(string key, JsonElement value, bool remove)
+	{
+		var element = remove ? default : value;
 		bool changed;
 		lock (gate)
 		{
@@ -155,9 +180,8 @@ internal sealed class SettingsStore
 		return changed;
 	}
 
-	internal bool Import(SettingsValue[] properties)
+	internal bool Import(Dictionary<string, JsonElement> replacement)
 	{
-		var replacement = SettingsValueCodec.DecodeObject(properties);
 		lock (gate)
 		{
 			values = replacement;

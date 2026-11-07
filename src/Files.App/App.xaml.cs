@@ -101,11 +101,13 @@ namespace Files.App
 
 				// Build the DI container off-thread while the window initializes
 				var appModel = AppModel;
+				IServiceProvider? backgroundProvider = null;
 				var servicesTask = Task.Run(() =>
 				{
 					try
 					{
 						var provider = AppLifecycleHelper.ConfigureHost(appModel);
+						backgroundProvider = provider;
 
 						// Configure Ioc here so Ioc.Default-dependent constructions warm off-thread too
 						Ioc.Default.ConfigureServices(provider);
@@ -120,7 +122,7 @@ namespace Files.App
 
 						return provider;
 					}
-					catch (Exception)
+					catch (Exception ex)
 					{
 						// A UI-thread-only service ctor failed off-thread; rebuilt on the UI thread below
 						return null;
@@ -140,8 +142,17 @@ namespace Files.App
 				var serviceProvider = await servicesTask;
 				if (serviceProvider is null)
 				{
-					serviceProvider = AppLifecycleHelper.ConfigureHost(appModel);
-					Ioc.Default.ConfigureServices(serviceProvider);
+					// The container may already have been handed to Ioc before the failure.
+					serviceProvider = backgroundProvider ?? AppLifecycleHelper.ConfigureHost(appModel);
+
+					try
+					{
+						Ioc.Default.ConfigureServices(serviceProvider);
+					}
+					catch (InvalidOperationException)
+					{
+						// Ioc is already configured, keep using the existing container.
+					}
 				}
 
 				var userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
@@ -182,7 +193,8 @@ namespace Files.App
 					MainWindow.Instance.ShowMainPage();
 				}
 
-				if (!await MainWindow.Instance.ActivateWithBackdropAsync())
+				var activated = await MainWindow.Instance.ActivateWithBackdropAsync();
+				if (!activated)
 					return;
 
 				Logger.LogInformation("Startup: initial content rendered after {Elapsed} ms", startup.ElapsedMilliseconds);

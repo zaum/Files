@@ -7,6 +7,8 @@
 Files.App.OpenDialog*.dll
 Files.App.SaveDialog*.dll
 Files.App.Launcher.exe
+# Local, machine-specific build/install notes (never commit)
+AGENTS.md
 
 # User-specific files
 *.rsuser

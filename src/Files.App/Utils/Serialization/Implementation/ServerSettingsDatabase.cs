@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using Files.App.Server;
+using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
 namespace Files.App.Utils.Serialization.Implementation;
@@ -26,7 +27,16 @@ internal sealed class ServerSettingsDatabase : IJsonSettingsDatabase
 		App.ServerChanged += OnServerChanged;
 	}
 
-	private Dictionary<string, JsonElement> ReadValues() => SettingsValueCodec.DecodeObject(Server.SettingsService.GetSettings(fileName));
+	private Dictionary<string, JsonElement> ReadValues()
+	{
+		var json = Server.SettingsService.GetSettings(fileName);
+		if (string.IsNullOrWhiteSpace(json))
+			return new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+		using var document = JsonDocument.Parse(json);
+		if (document.RootElement.ValueKind != JsonValueKind.Object)
+			return new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+		return document.RootElement.EnumerateObject().ToDictionary(property => property.Name, property => property.Value.Clone(), StringComparer.Ordinal);
+	}
 
 	public TValue? GetValue<TValue>(string key, TValue? defaultValue = default)
 	{
@@ -44,7 +54,7 @@ internal sealed class ServerSettingsDatabase : IJsonSettingsDatabase
 	public bool SetValue<TValue>(string key, TValue? value)
 	{
 		var element = GetElementFromValue(value);
-		var changed = Server.SettingsService.SetSetting(fileName, key, SettingsValueCodec.Encode(element));
+		var changed = Server.SettingsService.SetSetting(fileName, key, element.GetRawText());
 		lock (gate)
 		{
 			var localChanged = !cache.TryGetValue(key, out var old) || !JsonElement.DeepEquals(old, element);
@@ -76,7 +86,8 @@ internal sealed class ServerSettingsDatabase : IJsonSettingsDatabase
 		};
 		if (values is null)
 			return false;
-		var changed = Server.SettingsService.ImportSettings(fileName, SettingsValueCodec.EncodeObject(values));
+		var json = JsonSerializer.Serialize(values);
+		var changed = Server.SettingsService.ImportSettings(fileName, json);
 		var flushed = FlushSettings();
 		var fresh = ReadValues();
 		lock (gate)
