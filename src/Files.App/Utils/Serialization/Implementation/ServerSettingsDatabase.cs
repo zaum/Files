@@ -78,15 +78,17 @@ internal sealed class ServerSettingsDatabase : IJsonSettingsDatabase
 
 	public bool ImportSettings(object? import)
 	{
-		var values = import switch
+		Dictionary<string, JsonElement>? values = import switch
 		{
-			IDictionary<string, JsonElement> elements => elements,
-			IDictionary<string, object?> objects => objects.ToDictionary(pair => pair.Key, pair => GetElementFromValue(pair.Value)),
+			IDictionary<string, JsonElement> elements => new(elements, StringComparer.Ordinal),
+			IDictionary<string, object?> objects => objects.ToDictionary(pair => pair.Key, pair => GetElementFromValue(pair.Value), StringComparer.Ordinal),
 			_ => null,
 		};
 		if (values is null)
 			return false;
-		var json = JsonSerializer.Serialize(values);
+		// Serialized through the source-generated context: the reflection-based overload is not
+		// available in a Native AOT build.
+		var json = serializer.SerializeToJson(values, GetTypeInfo<Dictionary<string, JsonElement>>());
 		var changed = Server.SettingsService.ImportSettings(fileName, json);
 		var flushed = FlushSettings();
 		var fresh = ReadValues();

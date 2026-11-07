@@ -12,6 +12,7 @@ namespace Files.App.Services.Settings
 	[JsonSourceGenerationOptions(WriteIndented = true)]
 	[JsonSerializable(typeof(object))]
 	[JsonSerializable(typeof(ConcurrentDictionary<string, JsonElement>))]
+	[JsonSerializable(typeof(Dictionary<string, JsonElement>))]
 	[JsonSerializable(typeof(List<TagViewModel>))]
 	[JsonSerializable(typeof(IList<TagViewModel>))]
 	[JsonSerializable(typeof(Dictionary<string, IList<TagViewModel>>))]

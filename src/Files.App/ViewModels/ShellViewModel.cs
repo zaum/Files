@@ -2345,6 +2345,7 @@ namespace Files.App.ViewModels
 
 			stopwatch.Stop();
 			Debug.WriteLine($"Loading of items in {path} completed in {stopwatch.ElapsedMilliseconds} milliseconds.\n");
+			App.Logger.LogInformation("Listing of {ItemCount} items in '{Path}' completed in {ElapsedMilliseconds} ms.", filesAndFolders.Count, path, stopwatch.ElapsedMilliseconds);
 		}
 
 		public void CloseWatcher()
