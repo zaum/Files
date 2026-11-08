@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Storage.Streams;
 
@@ -20,8 +21,15 @@ internal static class IconCache
 		var cache = generic.GetOrAdd(key, _ => new CachedTask<byte[]>(async () =>
 		{
 			var path = folder ? Environment.SystemDirectory : Path.Combine(Path.GetPathRoot(Environment.SystemDirectory)!, "x46696c6573") + extension;
-			return await STATask.RunPooled(() => ShellImage.GetIcon(path, size, folder, IconOptions.ReturnIconOnly), Program.Logger, priority: true) ?? [];
-		}, TimeSpan.FromMinutes(5)));
+			if (IconDiskCache.TryGet(path, size, folder, out var cached))
+				return cached;
+
+			var genericStarted = Stopwatch.GetTimestamp();
+			var data = await STATask.RunPooled(() => ShellImage.GetIcon(path, size, folder, IconOptions.ReturnIconOnly), Program.Logger, priority: true) ?? [];
+			IconDiskCache.RecordExtraction(genericStarted);
+			if (data.Length > 0)
+				IconDiskCache.Store(path, size, folder, data);
+			return data;		}, TimeSpan.FromMinutes(5)));
 		return (await cache.GetAsync()).AsBuffer();
 	}
 
@@ -36,12 +44,32 @@ internal static class IconCache
 			&& (iconOptions.HasFlag(IconOptions.ReturnIconOnly)
 			|| iconOptions.HasFlag(IconOptions.ReturnOnlyIfCached));
 
+		// Only plain icon requests are persisted: thumbnails are large and content dependent (the shell
+		// caches those itself), overlays are a cheap badge lookup, and portable device paths have to be
+		// resolved before they mean anything.
+		var cacheable = !overlay
+			&& iconOptions.HasFlag(IconOptions.ReturnIconOnly)
+			&& !path.StartsWith(@"\\?\", StringComparison.Ordinal);
+
+		if (cacheable && IconDiskCache.TryGet(path, size, folder, out var cached))
+			return cached.AsBuffer();
+
+		var extractionStarted = Stopwatch.GetTimestamp();
 		var data = await STATask.RunPooled(() =>
 		{
 			var resolved = path.StartsWith(@"\\?\", StringComparison.Ordinal) ? MtpHelpers.ResolveMtpShellPath(path) ?? path : path;
 			return overlay ? ShellImage.GetIconOverlay(resolved, size, folder)
 				: ShellImage.GetIcon(resolved, size, folder, iconOptions);
 		}, Program.Logger, priority);
+
+		if (cacheable)
+		{
+			IconDiskCache.RecordExtraction(extractionStarted);
+
+			if (data is { Length: > 0 })
+				IconDiskCache.Store(path, size, folder, data);
+		}
+
 		return (data ?? []).AsBuffer();
 	}
 
