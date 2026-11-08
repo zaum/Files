@@ -83,6 +83,10 @@ namespace Files.App.ViewModels
 		private long navigationStartMs;
 		private long firstItemsShownMs = -1;
 
+		// Set while the items of this navigation come from the listing cache and must be dropped
+		// before the first freshly enumerated batch is appended.
+		private bool restoredFromCache;
+
 		private ListedItem? currentFolder;
 		public ListedItem? CurrentFolder
 		{
@@ -2204,6 +2208,8 @@ namespace Files.App.ViewModels
 
 		public void RefreshItems(string? previousDir, Action? postLoadCallback = null)
 		{
+			// Every navigation runs through here, so the listing cache is deliberately not cleared:
+			// a real refresh (file system watcher, folder customization) invalidates the entry itself.
 			_ = RapidAddItemsToCollectionAsync(WorkingDirectory, previousDir, postLoadCallback);
 		}
 
@@ -2283,6 +2289,17 @@ namespace Files.App.ViewModels
 			postLoadCallback?.Invoke();
 		}
 
+		// Cached items are on screen only until the enumeration delivers real ones; keeping them in
+		// the backing list would show every item twice, so the first fresh batch replaces them.
+		private void DropRestoredItems()
+		{
+			if (!restoredFromCache)
+				return;
+
+			restoredFromCache = false;
+			filesAndFolders.Clear();
+		}
+
 		private async Task RapidAddItemsToCollectionAsync(string? path, LibraryItem? library = null)
 		{
 			if (string.IsNullOrEmpty(path))
@@ -2292,6 +2309,20 @@ namespace Files.App.ViewModels
 			stopwatch.Start();
 			navigationStartMs = Environment.TickCount64;
 			firstItemsShownMs = -1;
+			restoredFromCache = false;
+			var cacheHit = false;
+
+			// Returning to a folder the user visited recently: paint its previous listing right
+			// away, the enumeration below replaces it as soon as the fresh items arrive.
+			if (FolderListingCache.IsCacheable(path) && FolderListingCache.TryGet(path, out var cachedItems))
+			{
+				restoredFromCache = true;
+				cacheHit = true;
+				filesAndFolders.AddRange(cachedItems);
+				await ApplyFilesAndFoldersChangesAsync();
+				firstItemsShownMs = Environment.TickCount64 - navigationStartMs;
+				App.Logger.LogInformation("Listing of {ItemCount} items in '{Path}' restored from cache after {ElapsedMilliseconds} ms.", cachedItems.Count, path, firstItemsShownMs);
+			}
 
 			var isRecycleBin = path.StartsWith(Constants.UserEnvironmentPaths.RecycleBinPath, StringComparison.Ordinal);
 			var enumerated = await EnumerateItemsFromStandardFolderAsync(path, addFilesCTS.Token, library);
@@ -2349,9 +2380,22 @@ namespace Files.App.ViewModels
 				return;
 			}
 
+			// Remember this listing for the next visit. The item objects are shared with the cache,
+			// so property loads that finish later (sizes, tags) are reflected in the cached copy too.
+			// An empty listing drops the entry instead: a folder whose items all disappeared must not
+			// come back from the cache.
+			if (!IsLoadingCancelled && enumerated == 0 && FolderListingCache.IsCacheable(path))
+			{
+				var listing = filesAndFolders.ToList();
+				if (listing.Count > 0)
+					FolderListingCache.Set(path, listing);
+				else
+					FolderListingCache.Invalidate(path);
+			}
+
 			stopwatch.Stop();
 			Debug.WriteLine($"Loading of items in {path} completed in {stopwatch.ElapsedMilliseconds} milliseconds.\n");
-			App.Logger.LogInformation("Listing of {ItemCount} items in '{Path}' completed in {ElapsedMilliseconds} ms; first items shown after {FirstItemsMs} ms.", filesAndFolders.Count, path, stopwatch.ElapsedMilliseconds, firstItemsShownMs);
+			App.Logger.LogInformation("Listing of {ItemCount} items in '{Path}' completed in {ElapsedMilliseconds} ms; first items shown after {FirstItemsMs} ms; cache {CacheResult}.", filesAndFolders.Count, path, stopwatch.ElapsedMilliseconds, firstItemsShownMs, cacheHit ? "hit" : "miss");
 		}
 
 		public void CloseWatcher()
@@ -2624,6 +2668,7 @@ namespace Files.App.ViewModels
 					{
 						List<ListedItem> fileList = await Win32StorageEnumerator.ListEntries(path, hFile, findData, cancellationToken, -1, GetPreloadIconSize(), intermediateAction: async (intermediateList) =>
 						{
+							DropRestoredItems();
 							filesAndFolders.AddRange(intermediateList);
 
 							// Skip the intermediate sort: re-sorting the whole accumulated list on every flush is O(n log n)
@@ -2635,6 +2680,7 @@ namespace Files.App.ViewModels
 								firstItemsShownMs = Environment.TickCount64 - navigationStartMs;
 						});
 
+						DropRestoredItems();
 						filesAndFolders.AddRange(fileList);
 
 						await OrderFilesAndFoldersAsync();
@@ -2687,6 +2733,7 @@ namespace Files.App.ViewModels
 						GetPreloadIconSize(),
 						async (intermediateList) =>
 						{
+							DropRestoredItems();
 							filesAndFolders.AddRange(intermediateList);
 
 							// Skip the intermediate sort: re-sorting the whole accumulated list on every flush is O(n log n)
@@ -2694,6 +2741,7 @@ namespace Files.App.ViewModels
 							_ = ApplyFilesAndFoldersChangesAsync();
 						});
 
+					DropRestoredItems();
 					filesAndFolders.AddRange(finalList);
 
 					await OrderFilesAndFoldersAsync();
@@ -2952,6 +3000,9 @@ namespace Files.App.ViewModels
 		{
 			Debug.WriteLine($"Directory watcher event: {e.ChangeType}, {e.FullPath}");
 
+			// The folder changed on disk, so its cached listing must not be painted again.
+			FolderListingCache.Invalidate(WorkingDirectory);
+
 			await dispatcherQueue.EnqueueOrInvokeAsync(() =>
 			{
 				RefreshItems(null);
@@ -2971,6 +3022,9 @@ namespace Files.App.ViewModels
 			options.SetThumbnailPrefetch(ThumbnailMode.ListView, 0, ThumbnailOptions.ReturnOnlyIfCached);
 
 			sender.ApplyNewQueryOptions(options);
+
+			// Indexer-driven listing changed; the cached copy is stale.
+			FolderListingCache.Invalidate(WorkingDirectory);
 
 			await dispatcherQueue.EnqueueOrInvokeAsync(() =>
 			{
@@ -3231,6 +3285,10 @@ namespace Files.App.ViewModels
 			var sampler = new IntervalSampler(200);
 			var updateQueue = new Queue<string>();
 
+			// The queue belongs to the folder that was current when the watcher started; the
+			// mutable WorkingDirectory may already point elsewhere by the time an edit lands.
+			var watchedPath = WorkingDirectory;
+
 			var anyEdits = false;
 			ListedItem? lastItemAdded = null;
 			var rand = Guid.NewGuid();
@@ -3245,6 +3303,16 @@ namespace Files.App.ViewModels
 				{
 					await RequestSelectionAsync([lastItemAdded]);
 					lastItemAdded = null;
+				}
+
+				// These edits are applied incrementally instead of re-listing the folder, so the
+				// cached listing must follow them: otherwise returning here would show a file that
+				// was already added, or one that was already removed.
+				if (watchedPath is not null && FolderListingCache.IsCacheable(watchedPath))
+				{
+					var listing = filesAndFolders.ToList();
+					if (listing.Count > 0)
+						FolderListingCache.Set(watchedPath, listing);
 				}
 
 				anyEdits = false;
