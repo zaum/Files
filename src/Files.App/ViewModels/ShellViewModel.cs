@@ -79,6 +79,10 @@ namespace Files.App.ViewModels
 
 		private readonly LayoutPreferencesManager folderSettings;
 
+		// Navigation timing, reported by the "Listing of ..." log line. Milliseconds on the tick clock.
+		private long navigationStartMs;
+		private long firstItemsShownMs = -1;
+
 		private ListedItem? currentFolder;
 		public ListedItem? CurrentFolder
 		{
@@ -2286,6 +2290,8 @@ namespace Files.App.ViewModels
 
 			var stopwatch = new Stopwatch();
 			stopwatch.Start();
+			navigationStartMs = Environment.TickCount64;
+			firstItemsShownMs = -1;
 
 			var isRecycleBin = path.StartsWith(Constants.UserEnvironmentPaths.RecycleBinPath, StringComparison.Ordinal);
 			var enumerated = await EnumerateItemsFromStandardFolderAsync(path, addFilesCTS.Token, library);
@@ -2345,7 +2351,7 @@ namespace Files.App.ViewModels
 
 			stopwatch.Stop();
 			Debug.WriteLine($"Loading of items in {path} completed in {stopwatch.ElapsedMilliseconds} milliseconds.\n");
-			App.Logger.LogInformation("Listing of {ItemCount} items in '{Path}' completed in {ElapsedMilliseconds} ms.", filesAndFolders.Count, path, stopwatch.ElapsedMilliseconds);
+			App.Logger.LogInformation("Listing of {ItemCount} items in '{Path}' completed in {ElapsedMilliseconds} ms; first items shown after {FirstItemsMs} ms.", filesAndFolders.Count, path, stopwatch.ElapsedMilliseconds, firstItemsShownMs);
 		}
 
 		public void CloseWatcher()
@@ -2623,6 +2629,10 @@ namespace Files.App.ViewModels
 							// Skip the intermediate sort: re-sorting the whole accumulated list on every flush is O(n log n)
 							// per batch. The final sort below still puts everything in the right order.
 							await ApplyFilesAndFoldersChangesAsync();
+
+							// Time until the user can see the first items of this navigation
+							if (firstItemsShownMs < 0)
+								firstItemsShownMs = Environment.TickCount64 - navigationStartMs;
 						});
 
 						filesAndFolders.AddRange(fileList);

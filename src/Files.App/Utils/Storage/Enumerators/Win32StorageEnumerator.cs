@@ -37,6 +37,12 @@ namespace Files.App.Utils.Storage
 			var tempList = new List<ListedItem>();
 			var count = 0;
 
+			// Every icon costs a round trip to the out-of-process icon server. A folder can hold
+			// thousands of items while only the first screenful is visible, so the preload is bounded;
+			// the remaining icons are fetched when their item is realized.
+			const int PreloadIconBudget = 120;
+			var remainingIconPreloads = PreloadIconBudget;
+
 			IUserSettingsService userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
 			bool CalculateFolderSizes = userSettingsService.FoldersSettingsService.CalculateFolderSizes;
 			bool showHiddenItems = userSettingsService.FoldersSettingsService.ShowHiddenItems;
@@ -66,12 +72,16 @@ namespace Files.App.Utils.Storage
 							{
 								var filePath = file.ItemPath!;
 								// Fire-and-forget icon preload so enumeration isn't blocked on the server IPC.
-								var __iconSize = iconSize;
-								_ = iconCacheService.GetIconAsync(file.ItemPath, file.FileExtension, false, __iconSize).ContinueWith(t =>
+								if (remainingIconPreloads > 0)
 								{
-									if (t.Status == TaskStatus.RanToCompletion && t.Result is not null)
-										file.PreloadedIconData = t.Result;
-								}, TaskScheduler.Default);
+									--remainingIconPreloads;
+									var __iconSize = iconSize;
+									_ = iconCacheService.GetIconAsync(file.ItemPath, file.FileExtension, false, __iconSize).ContinueWith(t =>
+									{
+										if (t.Status == TaskStatus.RanToCompletion && t.Result is not null)
+											file.PreloadedIconData = t.Result;
+									}, TaskScheduler.Default);
+								}
 								tempList.Add(file);
 								++count;
 
@@ -87,11 +97,15 @@ namespace Files.App.Utils.Storage
 								if (folder is not null)
 								{
 									var folderPath = folder.ItemPath!;
-									_ = iconCacheService.GetIconAsync(folder.ItemPath, null, true, iconSize).ContinueWith(t =>
+									if (remainingIconPreloads > 0)
 									{
-										if (t.Status == TaskStatus.RanToCompletion && t.Result is not null)
-											folder.PreloadedIconData = t.Result;
-									}, TaskScheduler.Default);
+										--remainingIconPreloads;
+										_ = iconCacheService.GetIconAsync(folder.ItemPath, null, true, iconSize).ContinueWith(t =>
+										{
+											if (t.Status == TaskStatus.RanToCompletion && t.Result is not null)
+												folder.PreloadedIconData = t.Result;
+										}, TaskScheduler.Default);
+									}
 									tempList.Add(folder);
 									++count;
 
