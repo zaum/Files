@@ -1,6 +1,7 @@
 // Copyright (c) Files Community
 // Licensed under the MIT License.
 
+using Files.Shared.Helpers;
 using Files.Storage;
 using System.IO;
 
@@ -40,7 +41,10 @@ internal sealed partial class ServerTrashWatcher : ITrashWatcher
 				var changes = server.RecycleBin.GetChanges();
 				foreach (var change in changes)
 				{
-					var type = change.Kind switch
+					if (!RecycleBinChangeCodec.TryDecode(change, out var kind, out var directory, out var name, out var oldName))
+						continue;
+
+					var type = (Server.RecycleBinChangeKind)kind switch
 					{
 						Server.RecycleBinChangeKind.Created => WatcherChangeTypes.Created,
 						Server.RecycleBinChangeKind.Deleted => WatcherChangeTypes.Deleted,
@@ -49,8 +53,8 @@ internal sealed partial class ServerTrashWatcher : ITrashWatcher
 						_ => WatcherChangeTypes.All,
 					};
 					FileSystemEventArgs args = type == WatcherChangeTypes.Renamed
-						? new RenamedEventArgs(type, change.Directory, change.Name, change.OldName)
-						: new FileSystemEventArgs(type, change.Directory, change.Name);
+						? new RenamedEventArgs(type, directory, name, oldName)
+						: new FileSystemEventArgs(type, directory, name);
 					var handler = type switch
 					{
 						WatcherChangeTypes.Created => ItemAdded,

@@ -70,9 +70,17 @@ internal static class IconDiskCache
 
 		try
 		{
-			// Read directly instead of asking whether the file exists: that halves the syscalls on
-			// the hot path, and a missing entry simply throws.
+			// A miss is the normal case on the first visit, so check for the file cheaply instead of
+			// letting ReadAllBytes throw: the server logs every first-chance exception with a stack
+			// trace, which floods the log and costs more than the stat call.
 			var file = Path.Combine(directory, key + ".bmp");
+			if (!File.Exists(file))
+			{
+				Record(false, started);
+				ReportProgress(requestCount);
+				return false;
+			}
+
 			data = File.ReadAllBytes(file);
 			if (data.Length is 0 or > MaxEntryBytes)
 			{
