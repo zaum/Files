@@ -33,6 +33,7 @@ namespace Files.App
 		public MainWindow() : base(416, 316)
 		{
 			InitializeComponent();
+			App.WindowConstructedMs = App.StartupClock.ElapsedMilliseconds;
 
 			ExtendsContentIntoTitleBar = true;
 			Title = "Files";

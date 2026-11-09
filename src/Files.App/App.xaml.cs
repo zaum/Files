@@ -28,6 +28,13 @@ namespace Files.App
 		private static FlyoutBase? _LastOpenedFlyout;
 		private static bool _isWindowTeardownCompleted;
 		private static bool _isWindowClosing;
+
+		/// <summary>
+		/// Wall clock from the moment this class exists, so the startup log line can report every stage
+		/// on one origin and a slow phase can be recognised from a log file alone.
+		/// </summary>
+		internal static readonly Stopwatch StartupClock = Stopwatch.StartNew();
+		internal static long WindowConstructedMs;
 		public static FlyoutBase? LastOpenedFlyout
 		{
 			set
@@ -84,7 +91,6 @@ namespace Files.App
 
 			async Task ActivateAsync()
 			{
-				var startup = Stopwatch.StartNew();
 				var appActivationArguments = Microsoft.Windows.AppLifecycle.AppInstance.GetCurrent().GetActivatedEventArgs();
 				var isStartupTask = appActivationArguments.Data is Windows.ApplicationModel.Activation.IStartupTaskActivatedEventArgs;
 
@@ -137,6 +143,7 @@ namespace Files.App
 
 				// The provider is always returned, so no re-creation is needed here.
 				var serviceProvider = await servicesTask;
+				var servicesMs = StartupClock.ElapsedMilliseconds;
 
 				var userSettingsService = Ioc.Default.GetRequiredService<IUserSettingsService>();
 				var serverInitialization = SafetyExtensions.IgnoreExceptions(async () =>
@@ -152,8 +159,11 @@ namespace Files.App
 					return;
 				}
 
-				// WinRT thumbnails can initialize the same Shell cache outside our icon helpers.
+				// WinRT thumbnails can initialize the same Shell cache outside our icon helpers. This has
+				// to finish before the first page is built: FileIconInit rebuilds the system image lists,
+				// which corrupts an in-flight WinRT thumbnail request (combase access violation).
 				await STATask.RunPooled(WindowsStorableHelpers.InitializeShellImageList, Logger);
+				var shellImageListMs = StartupClock.ElapsedMilliseconds;
 
 				if (isStartupTask)
 					Program.RegisterCurrentInstance();
@@ -178,11 +188,15 @@ namespace Files.App
 					MainWindow.Instance.ShowMainPage();
 				}
 
+				var mainPageMs = StartupClock.ElapsedMilliseconds;
+
 				var activated = await MainWindow.Instance.ActivateWithBackdropAsync();
 				if (!activated)
 					return;
 
-				Logger.LogInformation("Startup: initial content rendered after {Elapsed} ms", startup.ElapsedMilliseconds);
+				Logger.LogInformation(
+					"Startup: first frame after {FirstFrameMs} ms (window {WindowMs}, services {ServicesMs}, shell image list {ShellImageListMs}, main page {MainPageMs}).",
+					StartupClock.ElapsedMilliseconds, WindowConstructedMs, servicesMs, shellImageListMs, mainPageMs);
 				_ = serviceProvider.GetRequiredService<ICommandManager>();
 
 				var telemetryInitialization = AppLifecycleHelper.AppEnvironment is AppEnvironment.Dev
